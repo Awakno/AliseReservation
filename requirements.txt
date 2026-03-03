@@ -1,0 +1,3 @@
+awlise
+python-dotenv
+python-telegram-bot[job-queue]

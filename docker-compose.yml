@@ -1,0 +1,11 @@
+services:
+  autoreservation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: autoreservation
+    restart: unless-stopped
+    env_file:
+      - .env
+    mem_limit: 256m
+    mem_reservation: 128m
