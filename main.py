@@ -92,11 +92,11 @@ async def run_reservation_for_date(date_iso: str) -> tuple[bool, str, dict]:
     booking = next((item for item in bookings if item.date == date_iso), None)
 
     if booking is None:
-        return False, f"Date {date_iso} not found in booking calendar", {}
+        return False, f"Date {date_iso} non trouvée dans le calendrier de réservation", {}
     if booking.status == "reserved":
-        return False, f"Lunch already reserved for {date_iso}", {}
+        return False, f"Repas déjà réservé pour {date_iso}", {}
     if booking.status != "available" or not booking.identifier:
-        return False, f"Date {date_iso} is not reservable", {}
+        return False, f"Date {date_iso} n'est pas réservable", {}
 
     booking_ok = await awlise.bookMeal(
         session, booking.identifier, quantity=1, cancel=False
@@ -104,7 +104,7 @@ async def run_reservation_for_date(date_iso: str) -> tuple[bool, str, dict]:
     if not booking_ok:
         return (
             False,
-            f"Reservation request failed for {date_iso}",
+            f"Échec de la demande de réservation pour {date_iso}",
             {"identifier": booking.identifier},
         )
 
@@ -112,7 +112,7 @@ async def run_reservation_for_date(date_iso: str) -> tuple[bool, str, dict]:
 
     return (
         True,
-        f"Lunch reserved for {date_iso}",
+        f"Repas réservé pour {date_iso}",
         {
             "identifier": booking.identifier,
             "detail": (
@@ -155,7 +155,7 @@ async def find_first_reservable_date(
         return candidates[0]
 
     raise RuntimeError(
-        f"No reservable weekday found in next {max_days_to_scan} days starting from {start_date.isoformat()}."
+        f"Aucun jour réservable trouvé dans les prochains {max_days_to_scan} jours à partir du {start_date.isoformat()}."
     )
 
 
@@ -178,13 +178,13 @@ async def run_cancel_for_date(
         identifier = booking.identifier if booking and booking.identifier else None
 
     if not identifier:
-        return False, f"No cancelable reservation identifier found for {date_iso}"
+        return False, f"Aucun identifiant de réservation trouvé pour {date_iso}"
 
     canceled = await awlise.bookMeal(session, identifier, cancel=True)
     if not canceled:
-        return False, f"Cancellation request failed for {date_iso}"
+        return False, f"Échec de la demande d'annulation pour {date_iso}"
 
-    return True, f"Reservation canceled for {date_iso}"
+    return True, f"Réservation annulée pour {date_iso}"
 
 
 def parse_hhmm(raw: str) -> dtime:
@@ -198,7 +198,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if config.telegram_chat_id is None and chat_id is not None:
         config.telegram_chat_id = chat_id
     await update.message.reply_text(
-        "AutoReservation bot is running. Daily lunch booking is scheduled. Use /reserve_now for immediate booking."
+        "Le bot AutoReservation est en cours d'exécution. La réservation quotidienne du déjeuner est programmée. Utilisez /reserve_now pour réserver immédiatement."
     )
 
 
@@ -206,12 +206,12 @@ async def chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.application.bot_data["config"]
     current_chat_id = update.effective_chat.id if update.effective_chat else None
     if current_chat_id is None:
-        await update.message.reply_text("Unable to detect chat_id in this context.")
+        await update.message.reply_text("Impossible de détecter le chat_id dans ce contexte.")
         return
 
     config.telegram_chat_id = current_chat_id
     await update.message.reply_text(
-        f"chat_id: {current_chat_id}\nSaved for this running session."
+        f"chat_id: {current_chat_id}\nEnregistré pour cette session en cours."
     )
 
 
@@ -221,7 +221,7 @@ async def reserve_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if current_chat_id is not None:
         config.telegram_chat_id = current_chat_id
 
-    await update.message.reply_text("Launching immediate reservation...")
+    await update.message.reply_text("Lancement de la réservation immédiate...")
     await reserve_and_notify(context)
 
 
@@ -239,7 +239,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         next_date = f"unavailable ({exc})"
 
     await update.message.reply_text(
-        "Bot status:\n"
+        "Status du bot:\n"
         f"- chat_id: {effective_chat_id}\n"
         f"- timezone: {config.timezone}\n"
         f"- reservation_time: {config.reservation_time}\n"
@@ -265,7 +265,7 @@ async def reserve_and_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:
         logger.exception("Failed to compute first reservable date")
         await context.bot.send_message(
-            chat_id=chat_id, text=f"❌ Unable to find first reservable day: {exc}"
+            chat_id=chat_id, text=f"❌ Impossible de trouver le premier jour réservable: {exc}"
         )
         return
 
@@ -274,7 +274,7 @@ async def reserve_and_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:
         logger.exception("Reservation failed")
         await context.bot.send_message(
-            chat_id=chat_id, text=f"❌ Reservation failed: {exc}"
+            chat_id=chat_id, text=f"❌ Échec de la réservation: {exc}"
         )
         return
 
@@ -288,7 +288,7 @@ async def reserve_and_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
         "payload": {"identifier": payload.get("identifier") or target_identifier},
     }
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("↩️ Undo reservation", callback_data=action_id)]]
+        [[InlineKeyboardButton("↩️ Annuler la réservation", callback_data=action_id)]]
     )
     await context.bot.send_message(
         chat_id=chat_id,
@@ -304,7 +304,7 @@ async def handle_undo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     data = ACTION_CACHE.get(action_id)
     if not data:
-        await query.edit_message_text("⚠️ This action has expired or was already used.")
+        await query.edit_message_text("⚠️ Cette action a expiré ou a déjà été utilisée.")
         return
 
     success, message = await run_cancel_for_date(
