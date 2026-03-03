@@ -1,4 +1,5 @@
 import asyncio
+from email.utils import parsedate
 import logging
 import os
 from dataclasses import dataclass
@@ -92,7 +93,11 @@ async def run_reservation_for_date(date_iso: str) -> tuple[bool, str, dict]:
     booking = next((item for item in bookings if item.date == date_iso), None)
 
     if booking is None:
-        return False, f"Date {date_iso} non trouvée dans le calendrier de réservation", {}
+        return (
+            False,
+            f"Date {date_iso} non trouvée dans le calendrier de réservation",
+            {},
+        )
     if booking.status == "reserved":
         return False, f"Repas déjà réservé pour {date_iso}", {}
     if booking.status != "available" or not booking.identifier:
@@ -206,7 +211,9 @@ async def chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.application.bot_data["config"]
     current_chat_id = update.effective_chat.id if update.effective_chat else None
     if current_chat_id is None:
-        await update.message.reply_text("Impossible de détecter le chat_id dans ce contexte.")
+        await update.message.reply_text(
+            "Impossible de détecter le chat_id dans ce contexte."
+        )
         return
 
     config.telegram_chat_id = current_chat_id
@@ -265,7 +272,8 @@ async def reserve_and_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:
         logger.exception("Failed to compute first reservable date")
         await context.bot.send_message(
-            chat_id=chat_id, text=f"❌ Impossible de trouver le premier jour réservable: {exc}"
+            chat_id=chat_id,
+            text=f"❌ Impossible de trouver le premier jour réservable: {exc}",
         )
         return
 
@@ -318,6 +326,122 @@ async def handle_undo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.edit_message_text(f"⚠️ {message}")
 
 
+async def get_calendar_of_day(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    await update.message.reply_text("📅 Chargement du calendrier...")
+
+    try:
+        session = await create_session()
+        bookings = await awlise.getBookings(session)
+
+        reserved = [b for b in bookings if b.status == "reserved"]
+        available = [b for b in bookings if b.status == "available"]
+        unavailable = [b for b in bookings if b.status not in ("reserved", "available")]
+
+        lines = ["📅 <b>Calendrier de réservation</b>\n"]
+
+        if reserved:
+            lines.append("<b>✅ Réservé</b> ({})".format(len(reserved)))
+            for b in reserved[:7]:
+                lines.append("  🟩 {}".format(b.date))
+            if len(reserved) > 7:
+                lines.append("  <i>... +{} autre(s)</i>".format(len(reserved) - 7))
+
+        if available:
+            lines.append("\n<b>🟢 Disponible</b> ({})".format(len(available)))
+            for b in available[:7]:
+                lines.append("  🟩 {}".format(b.date))
+            if len(available) > 7:
+                lines.append("  <i>... +{} autre(s)</i>".format(len(available) - 7))
+
+        if unavailable:
+            lines.append("\n<b>⛔ Non réservable</b> ({})".format(len(unavailable)))
+            for b in unavailable[:5]:
+                lines.append("  🟥 {}".format(b.date))
+            if len(unavailable) > 5:
+                lines.append("  <i>... +{} autre(s)</i>".format(len(unavailable) - 5))
+
+        if not any([reserved, available, unavailable]):
+            lines.append("<i>Aucune donnée disponible</i>")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    except Exception as exc:
+        logger.exception("Failed to fetch calendar")
+        await update.message.reply_text(
+            f"❌ Erreur lors du chargement:\n<code>{str(exc)[:100]}</code>",
+            parse_mode="HTML",
+        )
+
+async def reserve_a_day(context: ContextTypes.DEFAULT_TYPE, date: str) -> None:
+    
+    config: Config = context.application.bot_data["config"]
+    chat_id = config.telegram_chat_id
+    if chat_id is None:
+        logger.warning(
+            "Skipping reservation: TELEGRAM_CHAT_ID not set and no /start received yet."
+        )
+        return
+
+    # convert 12/02 to ISO
+    try:
+        current_year = datetime.now().year
+        date_iso = datetime.strptime(f"{date}/{current_year}", "%d/%m/%Y").date().isoformat()
+    except ValueError:
+        await context.bot.send_message(
+            chat_id=chat_id, text=f"❌ Format de date invalide: {date}"
+        )
+        return
+
+    try:
+        success, message, _payload = await run_reservation_for_date(date_iso)
+    except Exception as exc:
+        logger.exception("Reservation failed")
+        await context.bot.send_message(
+            chat_id=chat_id, text=f"❌ Échec de la réservation pour {date}: {exc}"
+        )
+        return
+
+    if not success:
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ {message}")
+    else:
+        await context.bot.send_message(chat_id=chat_id, text=f"✅ {message}")
+
+async def unreserve_a_day(context: ContextTypes.DEFAULT_TYPE, date: str) -> None:
+    
+    config: Config = context.application.bot_data["config"]
+    chat_id = config.telegram_chat_id
+    if chat_id is None:
+        logger.warning(
+            "Skipping cancellation: TELEGRAM_CHAT_ID not set and no /start received yet."
+        )
+        return
+
+    # convert 12/02 to ISO
+    try:
+        current_year = datetime.now().year
+        date_iso = datetime.strptime(f"{date}/{current_year}", "%d/%m/%Y").date().isoformat()
+    except ValueError:
+        await context.bot.send_message(
+            chat_id=chat_id, text=f"❌ Format de date invalide: {date}"
+        )
+        return
+
+    try:
+        success, message = await run_cancel_for_date(date_iso, {})
+    except Exception as exc:
+        logger.exception("Cancellation failed")
+        await context.bot.send_message(
+            chat_id=chat_id, text=f"❌ Échec de l'annulation pour {date}: {exc}"
+        )
+        return
+
+    if not success:
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ {message}")
+    else:
+        await context.bot.send_message(chat_id=chat_id, text=f"✅ {message}")
+
 async def run_bot() -> None:
     config = load_config()
     app = Application.builder().token(config.telegram_token).build()
@@ -327,6 +451,9 @@ async def run_bot() -> None:
     app.add_handler(CommandHandler("chat_id", chat_id))
     app.add_handler(CommandHandler("reserve_now", reserve_now))
     app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("calendar", get_calendar_of_day))
+    app.add_handler(CommandHandler("reserve", lambda update, context: reserve_a_day(context, update.message.text.split(" ", 1)[1] if " " in update.message.text else "")))
+    app.add_handler(CommandHandler("unreserve", lambda update, context: unreserve_a_day(context, update.message.text.split(" ", 1)[1] if " " in update.message.text else "")))
     app.add_handler(CallbackQueryHandler(handle_undo, pattern=r"^undo:"))
 
     tz = ZoneInfo(config.timezone)
