@@ -1,5 +1,4 @@
 import asyncio
-from email.utils import parsedate
 import logging
 import os
 from dataclasses import dataclass
@@ -87,6 +86,15 @@ async def create_session() -> awlise.Session:
     )
 
 
+async def _get_balance(session: awlise.Session) -> dict:
+    home = await awlise.home(session)
+    return {
+        "balance": home.balance[0] if home and hasattr(home, "balance") else None,
+        "currency": home.balance[1] if home and hasattr(home, "balance") else None,
+    }
+
+
+
 async def run_reservation_for_date(date_iso: str) -> tuple[bool, str, dict]:
     session = await create_session()
     bookings = await awlise.getBookings(session)
@@ -102,14 +110,16 @@ async def run_reservation_for_date(date_iso: str) -> tuple[bool, str, dict]:
         return False, f"Repas déjà réservé pour {date_iso}", {}
     if booking.status != "available" or not booking.identifier:
         return False, f"Date {date_iso} n'est pas réservable", {}
-
+    balance = await _get_balance(session)
+    if balance.get("balance") is not None and balance.get("balance") <= 0:
+        return False, f"Solde insuffisant ({balance.get('balance')} {balance.get('currency')}) pour réserver le repas du {date_iso}", {}
     booking_ok = await awlise.bookMeal(
         session, booking.identifier, quantity=1, cancel=False
     )
     if not booking_ok:
         return (
             False,
-            f"Échec de la demande de réservation pour {date_iso}",
+            f"Échec de la demande de réservation pour {date_iso} => Solde actuel: {balance.get('balance')} {balance.get('currency')}",
             {"identifier": booking.identifier},
         )
 
@@ -117,7 +127,7 @@ async def run_reservation_for_date(date_iso: str) -> tuple[bool, str, dict]:
 
     return (
         True,
-        f"Repas réservé pour {date_iso}",
+        f"Repas réservé pour {date_iso} => Solde actuel: {balance.get('balance')} {balance.get('currency')}",
         {
             "identifier": booking.identifier,
             "detail": (
