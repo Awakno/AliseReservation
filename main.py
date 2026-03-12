@@ -39,6 +39,7 @@ def load_config() -> Config:
     chat_id = int(raw_chat) if raw_chat else None
 
     raw_offset = int(os.getenv("RESERVE_DATE_OFFSET_DAYS", "1"))
+
     if raw_offset < 1:
         logger.warning(
             "RESERVE_DATE_OFFSET_DAYS=%s is invalid for policy 'min 1 day before'; forcing to 1.",
@@ -110,6 +111,7 @@ async def run_reservation_for_date(date_iso: str) -> tuple[bool, str, dict]:
         return False, f"Repas déjà réservé pour {date_iso}", {}
     if booking.status != "available" or not booking.identifier:
         return False, f"Date {date_iso} n'est pas réservable", {}
+    
     balance = await _get_balance(session)
     if balance.get("balance") is not None and balance.get("balance") <= 0:
         return False, f"Solde insuffisant ({balance.get('balance')} {balance.get('currency')}) pour réserver le repas du {date_iso}", {}
@@ -279,6 +281,9 @@ async def reserve_and_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
             config.timezone,
             config.reserve_date_offset_days,
         )
+        if datetime.fromisoformat(target_date).day > datetime.now().day + 1:
+            print("The day of reservation is higher than tomorrow")
+            return
     except Exception as exc:
         logger.exception("Failed to compute first reservable date")
         await context.bot.send_message(
