@@ -5,7 +5,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, time as dtime
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
-import awlise
+from awlise import (
+    AliseClient,
+    AwliseError,
+    AuthenticationError,
+    AccountError,
+    BookingError,
+    PaymentError,
+    RequestError,
+    FetcherError,
+)
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
@@ -55,50 +64,42 @@ def load_config() -> Config:
     )
 
 
-def call_with_fallback(
-    fn, signatures: list[tuple], kwargs_list: list[dict] | None = None
-):
-    errors = []
-    kwargs_list = kwargs_list or [{}]
-    for args in signatures:
-        for kwargs in kwargs_list:
-            try:
-                return fn(*args, **kwargs)
-            except Exception as exc:
-                errors.append(exc)
-    raise RuntimeError(
-        f"All fallback calls failed for {getattr(fn, '__name__', str(fn))}: "
-        + "; ".join(str(e) for e in errors)
-    )
-
-
-async def create_session() -> awlise.Session:
+async def create_client() -> AliseClient:
     site_id = os.getenv("AWLISE_SITE_ID", "").strip()
     username = os.getenv("AWLISE_USERNAME", "").strip()
     password = os.getenv("AWLISE_PASSWORD", "").strip()
     if not site_id or not username or not password:
         raise RuntimeError(
-            "Missing AWLISE credentials: set AWLISE_SITE_ID, AWLISE_USERNAME, AWLISE_PASSWORD"
+            "Identifiants AWLISE manquants: renseignez AWLISE_SITE_ID, AWLISE_USERNAME, AWLISE_PASSWORD"
         )
-    return await awlise.login_credentials(
-        site_id=site_id,
-        username=username,
-        password=password,
-    )
+    try:
+        return await AliseClient.from_credentials(site_id, username, password)
+    except AuthenticationError as exc:
+        raise RuntimeError(f"Authentification Alise refusée: {exc}") from exc
+    except (RequestError, FetcherError) as exc:
+        raise RuntimeError(f"Serveur Alise injoignable: {exc}") from exc
+    except AwliseError as exc:
+        raise RuntimeError(f"Erreur Alise lors de la connexion: {exc}") from exc
 
 
-async def _get_balance(session: awlise.Session) -> dict:
-    home = await awlise.home(session)
-    return {
-        "balance": home.balance[0] if home and hasattr(home, "balance") else None,
-        "currency": home.balance[1] if home and hasattr(home, "balance") else None,
-    }
+async def _get_balance(client: AliseClient) -> dict:
+    try:
+        account = await client.get_account()
+    except AccountError as exc:
+        raise RuntimeError(f"Impossible de récupérer le solde du compte: {exc}") from exc
+    balance, currency = account.balance if account and account.balance else (None, None)
+    return {"balance": balance, "currency": currency}
 
 
 
 async def run_reservation_for_date(date_iso: str) -> tuple[bool, str, dict]:
-    session = await create_session()
-    bookings = await awlise.getBookings(session)
+    client = await create_client()
+
+    try:
+        bookings = await client.list_bookings()
+    except BookingError as exc:
+        return False, f"Impossible de charger le calendrier de réservation: {exc}", {}
+
     booking = next((item for item in bookings if item.date == date_iso), None)
 
     if booking is None:
@@ -111,39 +112,57 @@ async def run_reservation_for_date(date_iso: str) -> tuple[bool, str, dict]:
         return False, f"Repas déjà réservé pour {date_iso}", {}
     if booking.status != "available" or not booking.identifier:
         return False, f"Date {date_iso} n'est pas réservable", {}
-    
-    balance = await _get_balance(session)
+
+    balance = await _get_balance(client)
     if balance.get("balance") is not None and balance.get("balance") <= 0:
-        return False, f"Solde insuffisant ({balance.get('balance')} {balance.get('currency')}) pour réserver le repas du {date_iso}", {}
-    booking_ok = await awlise.bookMeal(
-        session, booking.identifier, quantity=1, cancel=False
-    )
+        return (
+            False,
+            f"Solde insuffisant ({balance.get('balance')} {balance.get('currency')}) pour réserver le repas du {date_iso}",
+            {},
+        )
+
+    try:
+        booking_ok = await client.book_meal(booking.identifier, quantity=1)
+    except (BookingError, PaymentError) as exc:
+        return (
+            False,
+            f"Échec de la réservation pour {date_iso}: {exc}",
+            {"identifier": booking.identifier},
+        )
+    meal_price = await client.get_meal_price()
     if not booking_ok:
         return (
             False,
-            f"Échec de la demande de réservation pour {date_iso} => Solde actuel: {balance.get('balance')} {balance.get('currency')}",
+            f"Échec de la demande de réservation pour {date_iso} => Solde actuel: {balance.get('balance')} {balance.get('currency')}. Le prix du repas est {meal_price[0]} {meal_price[1]}",
             {"identifier": booking.identifier},
         )
 
-    detail = await awlise.getBookingDetailByDateISO8601(session, date_iso)
+    try:
+        detail = await client.get_booking_by_date(date_iso)
+    except BookingError:
+        detail = None
 
+    
+    print(meal_price)
+    print(balance.get('balance'))
+    print(balance.get('currency'))
+    print(balance.get('balance') - meal_price[0])
     return (
         True,
-        f"Repas réservé pour {date_iso} => Solde actuel: {balance.get('balance')} {balance.get('currency')}",
+        f"Repas réservé pour {date_iso} => Solde actuel: {balance.get('balance') - meal_price[0]} {balance.get('currency')}",
         {
             "identifier": booking.identifier,
-            "detail": (
-                detail.model_dump()
-                if hasattr(detail, "model_dump") and detail
-                else None
-            ),
+            "detail": detail.model_dump() if detail else None,
         },
     )
 
 
 async def get_bookings() -> list:
-    session = await create_session()
-    return await awlise.getBookings(session)
+    client = await create_client()
+    try:
+        return await client.list_bookings()
+    except BookingError as exc:
+        raise RuntimeError(f"Impossible de charger le calendrier de réservation: {exc}") from exc
 
 
 async def find_first_reservable_date(
@@ -179,11 +198,14 @@ async def find_first_reservable_date(
 async def run_cancel_for_date(
     date_iso: str, reservation_payload: dict
 ) -> tuple[bool, str]:
-    session = await create_session()
+    client = await create_client()
     identifier = (reservation_payload or {}).get("identifier")
 
     if not identifier:
-        bookings = await awlise.getBookings(session)
+        try:
+            bookings = await client.list_bookings()
+        except BookingError as exc:
+            return False, f"Impossible de charger le calendrier de réservation: {exc}"
         booking = next(
             (
                 item
@@ -197,7 +219,11 @@ async def run_cancel_for_date(
     if not identifier:
         return False, f"Aucun identifiant de réservation trouvé pour {date_iso}"
 
-    canceled = await awlise.bookMeal(session, identifier, cancel=True)
+    try:
+        canceled = await client.cancel_meal(identifier)
+    except BookingError as exc:
+        return False, f"Échec de l'annulation pour {date_iso}: {exc}"
+
     if not canceled:
         return False, f"Échec de la demande d'annulation pour {date_iso}"
 
@@ -282,6 +308,10 @@ async def reserve_and_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
             config.reserve_date_offset_days,
         )
         if datetime.fromisoformat(target_date).day > datetime.now().day + 1:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"⚠️ Le jour de réservation ({target_date}) est supérieur à demain. Vérifiez la configuration de RESERVE_DATE_OFFSET_DAYS.",
+            )
             print("The day of reservation is higher than tomorrow")
             return
     except Exception as exc:
@@ -347,8 +377,8 @@ async def get_calendar_of_day(
     await update.message.reply_text("📅 Chargement du calendrier...")
 
     try:
-        session = await create_session()
-        bookings = await awlise.getBookings(session)
+        client = await create_client()
+        bookings = await client.list_bookings()
 
         reserved = [b for b in bookings if b.status == "reserved"]
         available = [b for b in bookings if b.status == "available"]
@@ -382,6 +412,12 @@ async def get_calendar_of_day(
 
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
+    except AwliseError as exc:
+        logger.exception("Failed to fetch calendar")
+        await update.message.reply_text(
+            f"❌ Erreur Alise lors du chargement:\n<code>{str(exc)[:200]}</code>",
+            parse_mode="HTML",
+        )
     except Exception as exc:
         logger.exception("Failed to fetch calendar")
         await update.message.reply_text(
