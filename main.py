@@ -308,10 +308,7 @@ async def reserve_and_notify(context: ContextTypes.DEFAULT_TYPE) -> None:
             config.reserve_date_offset_days,
         )
         if datetime.fromisoformat(target_date).day > datetime.now().day + 1:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=f"⚠️ Le jour de réservation ({target_date}) est supérieur à demain. Vérifiez la configuration de RESERVE_DATE_OFFSET_DAYS.",
-            )
+            logger.warning("The day of reservation is higher than tomorrow")
             print("The day of reservation is higher than tomorrow")
             return
     except Exception as exc:
@@ -382,7 +379,7 @@ async def get_calendar_of_day(
 
         reserved = [b for b in bookings if b.status == "reserved"]
         available = [b for b in bookings if b.status == "available"]
-        unavailable = [b for b in bookings if b.status not in ("reserved", "available")]
+        
 
         lines = ["📅 <b>Calendrier de réservation</b>\n"]
 
@@ -400,14 +397,9 @@ async def get_calendar_of_day(
             if len(available) > 7:
                 lines.append("  <i>... +{} autre(s)</i>".format(len(available) - 7))
 
-        if unavailable:
-            lines.append("\n<b>⛔ Non réservable</b> ({})".format(len(unavailable)))
-            for b in unavailable[:5]:
-                lines.append("  🟥 {}".format(b.date))
-            if len(unavailable) > 5:
-                lines.append("  <i>... +{} autre(s)</i>".format(len(unavailable) - 5))
+        
 
-        if not any([reserved, available, unavailable]):
+        if not any([reserved, available]):
             lines.append("<i>Aucune donnée disponible</i>")
 
         await update.message.reply_text("\n".join(lines), parse_mode="HTML")
@@ -493,6 +485,43 @@ async def unreserve_a_day(context: ContextTypes.DEFAULT_TYPE, date: str) -> None
     else:
         await context.bot.send_message(chat_id=chat_id, text=f"✅ {message}")
 
+async def notify_no_reservation(context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: Config = context.application.bot_data["config"]
+    chat_id = config.telegram_chat_id
+    if chat_id is None:
+        logger.warning(
+            "Skipping no-reservation notification: TELEGRAM_CHAT_ID not set and no /start received yet."
+        )
+        return
+
+    try:
+        target_date, _identifier = await find_first_reservable_date(
+            config.timezone,
+            config.reserve_date_offset_days,
+        )
+    except Exception as exc:
+        logger.exception("Failed to compute first reservable date")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ Impossible de trouver le premier jour réservable: {exc}",
+        )
+        return
+
+    # Check if the reservation for the target date is already made
+    client = await create_client()
+    bookings = await client.list_bookings()
+    booking = next((item for item in bookings if item.date == target_date), None)
+
+    if booking and booking.status == "reserved":
+        logger.info("Reservation already made for %s", target_date)
+        return  # No notification needed
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"⚠️ [RAPPEL] Aucune réservation effectuée pour demain.",
+    )
+
+
 async def run_bot() -> None:
     config = load_config()
     app = Application.builder().token(config.telegram_token).build()
@@ -512,6 +541,11 @@ async def run_bot() -> None:
         reserve_and_notify,
         time=parse_hhmm(config.reservation_time).replace(tzinfo=tz),
         name="daily_lunch_reservation",
+    )
+    app.job_queue.run_daily(
+        notify_no_reservation,
+        time=datetime.strptime("22:00", "%H:%M").time().replace(tzinfo=tz),
+        name="daily_no_reservation_notification",
     )
 
     await app.initialize()
