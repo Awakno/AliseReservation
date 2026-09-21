@@ -494,31 +494,39 @@ async def notify_no_reservation(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
+    tz = ZoneInfo(config.timezone)
+    target_date = (
+        datetime.now(tz).date() + timedelta(days=config.reserve_date_offset_days)
+    ).isoformat()
+
     try:
-        target_date, _identifier = await find_first_reservable_date(
-            config.timezone,
-            config.reserve_date_offset_days,
-        )
+        client = await create_client()
+        bookings = await client.list_bookings()
     except Exception as exc:
-        logger.exception("Failed to compute first reservable date")
+        logger.exception("Failed to fetch bookings for no-reservation check")
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"❌ Impossible de trouver le premier jour réservable: {exc}",
+            text=f"❌ Impossible de vérifier les réservations: {exc}",
         )
         return
 
-    # Check if the reservation for the target date is already made
-    client = await create_client()
-    bookings = await client.list_bookings()
     booking = next((item for item in bookings if item.date == target_date), None)
 
     if booking and booking.status == "reserved":
         logger.info("Reservation already made for %s", target_date)
         return  # No notification needed
 
+    if booking is None or booking.status != "available":
+        logger.info(
+            "No reservable slot for %s (status=%s); skipping reminder",
+            target_date,
+            booking.status if booking else None,
+        )
+        return  # Nothing to reserve (e.g. weekend/closed day), no notification needed
+
     await context.bot.send_message(
         chat_id=chat_id,
-        text=f"⚠️ [RAPPEL] Aucune réservation effectuée pour demain.",
+        text=f"⚠️ [RAPPEL] Aucune réservation effectuée pour demain ({target_date}).",
     )
 
 
